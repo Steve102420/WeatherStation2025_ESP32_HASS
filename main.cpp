@@ -112,7 +112,6 @@ void MqttReceiverCallback(char *topic, byte *inFrame, unsigned int length);
 void InitSensors(void);
 void readVEML6075(void);
 void readBH1750(void);
-//void IRAM_ATTR lightningISR(void);
 void ICACHE_RAM_ATTR lightningISR(void);
 
 //----------------------------------------------------------------------------------------
@@ -548,10 +547,6 @@ void readBH1750(void)
         Serial.println(" lx");
     }
 }
-/*void IRAM_ATTR lightningISR(void)
-{
-  lightningDetected = true;
-}*/
 ICACHE_RAM_ATTR void lightningISR(void)
 {
   lightningDetected = true;
