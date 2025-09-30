@@ -1,4 +1,6 @@
 #include <Arduino.h>                           // Arduino core library
+#include <Ticker.h>                            // Timer library
+#include "driver/pcnt.h"                       // Pulse counter library
 #include <Wire.h>                              // I2C library
 #include <WiFi.h>                              // WiFi library
 #include <PubSubClient.h>                      // MQTT library
@@ -9,20 +11,30 @@
 #include <SparkFun_VEML6075_Arduino_Library.h> // UV Sensor 0x10
 #include "SparkFun_AS3935.h"                   // Lightning sensor 0x03
 #include <BH1750.h>                            // Light sensor 0x23
-
 //----------------------------------------------------------------------------------------
-
 // Define constants
 #define PERIOD_MILLSEC_1000 1000
-#define PERIOD_MILLSEC_500 500
-#define PERIOD_MILLSEC_250 250
+#define PERIOD_MILLSEC_500  500
+#define PERIOD_MILLSEC_250  250
 
-#define AS3935_ADDR 0x03
-#define INDOOR 0x12
-#define OUTDOOR 0xE
-#define LIGHTNING_INT 0x08
-#define DISTURBER_INT 0x04
-#define NOISE_INT 0x01
+#define AS3935_ADDR         0x03
+#define INDOOR              0x12
+#define OUTDOOR             0xE
+#define LIGHTNING_INT       0x08
+#define DISTURBER_INT       0x04
+#define NOISE_INT           0x01
+
+#define WIND_SPEED_PIN      23
+#define WIND_DIRECTION_PIN  19
+#define RAIN_GAUGE_PIN      32
+#define LIGHTNING_INT_PIN   18
+
+//PCNT definitions
+#define WIND_PCNT_UNIT      PCNT_UNIT_0
+#define RAIN_PCNT_UNIT      PCNT_UNIT_1
+#define SAMPLE_INTERVAL_MS  1000                // sample interval in milliseconds
+
+
 //----------------------------------------------------------------------------------------
 const char *ssid = WIFI_SSID;                   // WiFi SSID
 const char *password = WIFI_PASSWORD;           // WiFi Password
@@ -47,7 +59,9 @@ int mqttCounterConn = 0;
 String UniqueId;
 
 
-
+int16_t windCount = 0;
+int16_t rainCount = 0;
+Ticker sampleTimer;
 
 // BME280 Sensor
 Adafruit_BME280 bme;
@@ -58,51 +72,35 @@ BH1750 lightMeter(0x23);
 float lux = 0;
 
 // Lightning sensor
-SparkFun_AS3935 lightning(AS3935_ADDR); // Interrupt pin for lightning detection
-const int lightningInt = 18;
-// Values for modifying the IC's settings. All of these values are set to their
-// default values.
+SparkFun_AS3935 lightning(AS3935_ADDR);
+const int lightningInt = LIGHTNING_INT_PIN;
 byte noiseFloor = 1;
 byte watchDogVal = 1;
 byte spike = 1;
 byte lightningThresh = 1;
 char message[] = "";
-// This variable holds the number representing the lightning or non-lightning
-// event issued by the lightning detector.
 byte intVal = 0;
-byte distance = 0; // Distance to storm in km
+byte distance = 0;
 byte noise_flag = 0;
 byte disturber_flag = 0;
-long lightEnergy = 0; // Lightning energy
+long lightEnergy = 0;
 volatile bool lightningDetected = false;
 
 
 // UV sensor
-VEML6075 uv; // Create a VEML6075 object
-// Calibration constants:
-// Four gain calibration constants -- alpha, beta, gamma, delta -- can be used to correct the output in
-// reference to a GOLDEN sample. The golden sample should be calibrated under a solar simulator.
-// Setting these to 1.0 essentialy eliminates the "golden"-sample calibration
-const float CALIBRATION_ALPHA_VIS = 1.0; // UVA / UVAgolden
-const float CALIBRATION_BETA_VIS = 1.0;  // UVB / UVBgolden
-const float CALIBRATION_GAMMA_IR = 1.0;  // UVcomp1 / UVcomp1golden
-const float CALIBRATION_DELTA_IR = 1.0;  // UVcomp2 / UVcomp2golden
-// Responsivity:
-// Responsivity converts a raw 16-bit UVA/UVB reading to a relative irradiance (W/m^2).
-// These values will need to be adjusted as either integration time or dynamic settings are modififed.
-// These values are recommended by the "Designing the VEML6075 into an application" app note for 100ms IT
-const float UVA_RESPONSIVITY = 0.00110; // UVAresponsivity
-const float UVB_RESPONSIVITY = 0.00125; // UVBresponsivity
-// UV coefficients:
-// These coefficients
-// These values are recommended by the "Designing the VEML6075 into an application" app note
-const float UVA_VIS_COEF_A = 2.22; // a
-const float UVA_IR_COEF_B = 1.33;  // b
-const float UVB_VIS_COEF_C = 2.95; // c
-const float UVB_IR_COEF_D = 1.75;  // d
+VEML6075 uv;
 uint16_t rawA, rawB, visibleComp, irComp;
 float uviaCalc, uvibCalc, uvia, uvib, uvi;
-
+const float CALIBRATION_ALPHA_VIS = 1.0;
+const float CALIBRATION_BETA_VIS = 1.0;
+const float CALIBRATION_GAMMA_IR = 1.0;
+const float CALIBRATION_DELTA_IR = 1.0;
+const float UVA_RESPONSIVITY = 0.00110;
+const float UVB_RESPONSIVITY = 0.00125;
+const float UVA_VIS_COEF_A = 2.22;
+const float UVA_IR_COEF_B = 1.33;
+const float UVB_VIS_COEF_C = 2.95;
+const float UVB_IR_COEF_D = 1.75;
 //----------------------------------------------------------------------------------------
 
 // Function declarations
@@ -112,8 +110,12 @@ void MqttReceiverCallback(char *topic, byte *inFrame, unsigned int length);
 void InitSensors(void);
 void readVEML6075(void);
 void readBH1750(void);
+void readBME280(void);
+void printDebugInfo(void);
 void ICACHE_RAM_ATTR lightningISR(void);
-
+void setupWindPCNT(void);
+void setupRainPCNT(void);
+void readCounts(void);
 //----------------------------------------------------------------------------------------
 
 void setup()
@@ -125,13 +127,17 @@ void setup()
     Wire.begin(21, 22);
     Wire.setClock(100000); // iAQ-Core can operate at a maximum of 100kHz
 
-    
-
     InitSensors();
     delay(100);
 
     setup_wifi();
     delay(100);
+
+    pinMode(WIND_SPEED_PIN, INPUT_PULLUP);
+    pinMode(RAIN_GAUGE_PIN, INPUT_PULLUP);
+    setupWindPCNT();
+    setupRainPCNT();
+    sampleTimer.attach_ms(SAMPLE_INTERVAL_MS, readCounts);
 
     mqttPubSub.setServer(mqtt_server, mqttPort);
     mqttPubSub.setCallback(MqttReceiverCallback);
@@ -159,24 +165,11 @@ void loop()
         {
             count = 0;
 
-            float temperature = bme.readTemperature();
-            float humidity = bme.readHumidity();
-            float pressure = bme.readPressure() / 100.0F;
-
             readVEML6075();
             readBH1750();
+            readBME280();
             
-            Serial.print("Temperature: ");
-            Serial.print(temperature);
-            Serial.println(" °C");
-
-            Serial.print("Humidity: ");
-            Serial.print(humidity);
-            Serial.println(" %");
-
-            Serial.print("Pressure: ");
-            Serial.print(pressure);
-            Serial.println(" hPa");
+            printDebugInfo();
 
             // JSON payload építése
             StaticJsonDocument<600> doc;
@@ -185,19 +178,16 @@ void loop()
             doc["atmospheric_pressure"] = pressure;
             doc["lux"] = lux;
             doc["uvi"] = uvi;
-            
-            
 
+            
             if (distance > 0)
             {
                 doc["lightningdistance"] = distance;
             }
-            
             if (lightEnergy > 0)
             {
                 doc["lightningenergy"] = lightEnergy;
             }
-
             if (noise_flag > 0)
             {
                 doc["noise"] = noise_flag;
@@ -249,15 +239,11 @@ void loop()
         else if (intVal == LIGHTNING_INT)
         {
             Serial.println("Lightning Strike Detected!");
-            // Lightning! Now how far away is it? Distance estimation takes into
-            // account previously seen events.
             distance = lightning.distanceToStorm();
             Serial.print("Approximately: ");
             Serial.print(distance);
             Serial.println("km away!");
 
-            // "Lightning Energy" and I do place into quotes intentionally, is a pure
-            // number that does not have any physical meaning.
             lightEnergy = lightning.lightningEnergy();
             Serial.print("Lightning Energy: ");
             Serial.println(lightEnergy);
@@ -547,7 +533,98 @@ void readBH1750(void)
         Serial.println(" lx");
     }
 }
+void readBME280(void)
+{
+    temperature = bme.readTemperature();
+    humidity = bme.readHumidity();
+    pressure = bme.readPressure() / 100.0F;
+}
+void printDebugInfo(void)
+{
+    Serial.print("Temperature: ");
+    Serial.print(temperature);
+    Serial.println(" °C");
+
+    Serial.print("Humidity: ");
+    Serial.print(humidity);
+    Serial.println(" %");
+
+    Serial.print("Pressure: ");
+    Serial.print(pressure);
+    Serial.println(" hPa");
+    
+    /*Serial.print("MQTT: Send Data -> ");
+    Serial.print(topic);
+    Serial.print(": ");
+    Serial.println(jsonBuffer);*/
+}
 ICACHE_RAM_ATTR void lightningISR(void)
 {
   lightningDetected = true;
+}
+void setupWindPCNT(void)
+{
+    pcnt_config_t pcnt_config =
+    {
+        .pulse_gpio_num = WIND_SPEED_PIN,
+        .ctrl_gpio_num = PCNT_PIN_NOT_USED,
+        .lctrl_mode = PCNT_MODE_KEEP,
+        .hctrl_mode = PCNT_MODE_KEEP,
+        .pos_mode = PCNT_COUNT_INC,    // felfutó él növel
+        .neg_mode = PCNT_COUNT_DIS,
+        .counter_h_lim = 32767,
+        .counter_l_lim = 0,
+        .unit = WIND_PCNT_UNIT,
+        .channel = PCNT_CHANNEL_0
+    };
+
+    pcnt_unit_config(&pcnt_config);
+    pcnt_set_filter_value(WIND_PCNT_UNIT, 1000);
+    pcnt_filter_enable(WIND_PCNT_UNIT);
+    pcnt_counter_pause(WIND_PCNT_UNIT);
+    pcnt_counter_clear(WIND_PCNT_UNIT);
+    pcnt_counter_resume(WIND_PCNT_UNIT);
+}
+
+// ---------- Esőmérő PCNT konfigurálása ----------
+void setupRainPCNT(void)
+{
+    pcnt_config_t pcnt_config =
+    {
+        .pulse_gpio_num = RAIN_GAUGE_PIN,
+        .ctrl_gpio_num = PCNT_PIN_NOT_USED,
+        .lctrl_mode = PCNT_MODE_KEEP,
+        .hctrl_mode = PCNT_MODE_KEEP,
+        .pos_mode = PCNT_COUNT_INC,    // felfutó él növel
+        .neg_mode = PCNT_COUNT_DIS,
+        .counter_h_lim = 32767,
+        .counter_l_lim = 0,
+        .unit = RAIN_PCNT_UNIT,
+        .channel = PCNT_CHANNEL_0
+    };
+
+    pcnt_unit_config(&pcnt_config);
+    pcnt_set_filter_value(RAIN_PCNT_UNIT, 1000);
+    pcnt_filter_enable(RAIN_PCNT_UNIT);
+    pcnt_counter_pause(RAIN_PCNT_UNIT);
+    pcnt_counter_clear(RAIN_PCNT_UNIT);
+    pcnt_counter_resume(RAIN_PCNT_UNIT);
+}
+
+// ---------- Mintavétel mindkét számlálóra ----------
+void readCounts(void)
+{
+    pcnt_get_counter_value(WIND_PCNT_UNIT, &windCount);
+    pcnt_get_counter_value(RAIN_PCNT_UNIT, &rainCount);
+
+    Serial.print("[Szél] Pulzusok: ");
+    Serial.print(windCount);
+    Serial.print("    |    [Eső] Pulzusok: ");
+    Serial.println(rainCount);
+
+    // ✏️ Itt számolhatod tovább: windCount → km/h, rainCount → mm / liter stb.
+
+    // Számlálók nullázása következő ciklushoz
+    pcnt_counter_clear(WIND_PCNT_UNIT);
+    pcnt_counter_clear(RAIN_PCNT_UNIT);
 }
