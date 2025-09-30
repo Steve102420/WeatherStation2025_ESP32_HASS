@@ -11,6 +11,7 @@
 #include <SparkFun_VEML6075_Arduino_Library.h> // UV Sensor 0x10
 #include "SparkFun_AS3935.h"                   // Lightning sensor 0x03
 #include <BH1750.h>                            // Light sensor 0x23
+#include "AS5600.h"                            // Magnetic angle sensor 0x36
 //----------------------------------------------------------------------------------------
 // Define constants
 #define PERIOD_MILLSEC_1000 1000
@@ -101,6 +102,11 @@ const float UVA_VIS_COEF_A = 2.22;
 const float UVA_IR_COEF_B = 1.33;
 const float UVB_VIS_COEF_C = 2.95;
 const float UVB_IR_COEF_D = 1.75;
+
+//AS5600
+//AS5600L as5600;
+AS5600 as5600;
+
 //----------------------------------------------------------------------------------------
 
 // Function declarations
@@ -138,6 +144,14 @@ void setup()
     setupWindPCNT();
     setupRainPCNT();
     sampleTimer.attach_ms(SAMPLE_INTERVAL_MS, readCounts);
+
+
+    as5600.setDirection(AS5600_CLOCK_WISE);  //  default, just be explicit.
+    int b = as5600.isConnected();
+    Serial.print("Connect: ");
+    Serial.println(b);
+    delay(1000);
+
 
     mqttPubSub.setServer(mqtt_server, mqttPort);
     mqttPubSub.setCallback(MqttReceiverCallback);
@@ -553,6 +567,8 @@ void printDebugInfo(void)
     Serial.print(pressure);
     Serial.println(" hPa");
     
+    Serial.print(as5600.readAngle());
+
     /*Serial.print("MQTT: Send Data -> ");
     Serial.print(topic);
     Serial.print(": ");
@@ -627,4 +643,7 @@ void readCounts(void)
     // Számlálók nullázása következő ciklushoz
     pcnt_counter_clear(WIND_PCNT_UNIT);
     pcnt_counter_clear(RAIN_PCNT_UNIT);
+
+    //Serial.print(as5600.readAngle());
+    Serial.println(as5600.rawAngle() * AS5600_RAW_TO_DEGREES);
 }
