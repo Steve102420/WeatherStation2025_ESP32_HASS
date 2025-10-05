@@ -34,7 +34,12 @@
 #define WIND_PCNT_UNIT      PCNT_UNIT_0
 #define RAIN_PCNT_UNIT      PCNT_UNIT_1
 #define SAMPLE_INTERVAL_MS  1000                // sample interval in milliseconds
+#define SAMPLE_INTERVAL_MS  2000    // Mintavételezés 2 másodpercenként
+#define AVERAGING_PERIOD_MS 600000  // 10 perc = 600 000 ms
 
+#define RADIUS_M            0.10f               // Forgás középpont – félgömb közepe távolság (m)
+#define IMPULSES_REV        1                   // Impulzus / fordulat
+#define SECONDS_IN_HOUR     3600.0f
 
 //----------------------------------------------------------------------------------------
 const char *ssid = WIFI_SSID;                   // WiFi SSID
@@ -123,7 +128,6 @@ void setupWindPCNT(void);
 void setupRainPCNT(void);
 void readCounts(void);
 //----------------------------------------------------------------------------------------
-
 void setup()
 {
     Serial.begin(115200);
