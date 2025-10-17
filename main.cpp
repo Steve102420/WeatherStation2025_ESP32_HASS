@@ -104,7 +104,6 @@ byte disturber_flag = 0;
 long lightEnergy = 0;
 volatile bool lightningDetected = false;
 
-
 // UV sensor
 VEML6075 uv;
 uint16_t rawA, rawB, visibleComp, irComp;
@@ -135,9 +134,10 @@ uint16_t batteryVoltage = 0;
 
 // Function declarations
 void setup_wifi(void);
-void MqttReconnect(void);
-void MqttReceiverCallback(char *topic, byte *inFrame, unsigned int length);
-void InitSensors(void);
+void mqttReconnect(void);
+void mqttReceiverCallback(char *topic, byte *inFrame, unsigned int length);
+void initSystem(void);
+void initSensors(void);
 void readVEML6075(void);
 void readBH1750(void);
 void readBME280(void);
@@ -155,17 +155,12 @@ void batteryVoltageMeasurement(void);
 //----------------------------------------------------------------------------------------
 void setup()
 {
-    Serial.begin(115200);
-    delay(200);
-    Serial.print("Start");
-    Wire.begin(21, 22);
-    //Wire.setClock(100000); // iAQ-Core can operate at a maximum of 100kHz
-
-    InitSensors();
+    initSystem();
+    initSensors();
     setup_wifi();
 
     mqttPubSub.setServer(mqtt_server, mqttPort);
-    mqttPubSub.setCallback(MqttReceiverCallback);
+    mqttPubSub.setCallback(mqttReceiverCallback);
 }
 
 void loop()
@@ -173,7 +168,7 @@ void loop()
     if (WiFi.status() == WL_CONNECTED)
     {
         if (!mqttPubSub.connected())
-            MqttReconnect();
+            mqttReconnect();
         else
             mqttPubSub.loop();
     }
@@ -281,15 +276,7 @@ void loop()
         }
     }
 }
-
-
-
-
-
-
-
-
-
+//----------------------------------------------------------------------------------------
 
 
 void setup_wifi(void)
@@ -327,7 +314,7 @@ void setup_wifi(void)
         Serial.println("WiFi NOT connected!!!");
     }
 }
-void MqttReconnect(void)
+void mqttReconnect(void)
 {
     // Loop until we're reconnected
     while (!mqttPubSub.connected() && (mqttCounterConn++ < 4))
@@ -351,7 +338,7 @@ void MqttReconnect(void)
     }
     mqttCounterConn = 0;
 }
-void MqttReceiverCallback(char *topic, byte *inFrame, unsigned int length)
+void mqttReceiverCallback(char *topic, byte *inFrame, unsigned int length)
 {
     Serial.print("Message arrived on topic: ");
     Serial.print(topic);
@@ -365,7 +352,14 @@ void MqttReceiverCallback(char *topic, byte *inFrame, unsigned int length)
     }
     Serial.println();
 }
-void InitSensors(void)
+void initSystem(void)
+{
+    Serial.begin(115200);
+    delay(100);
+    Serial.println("Weather Station Initializing...");
+    Wire.begin(21, 22);
+}
+void initSensors(void)
 {
     // BME280 sensor initialization
     if (!bme.begin(0x76))
@@ -713,7 +707,6 @@ float calculateWindSpeedKmh(int16_t totalPulses, float intervalSec)
     float avgSpeed_kmh = avgSpeed_m_s * 3.6f * FRICTION_COMPENSATION; // km/h
     return avgSpeed_kmh;                            // km/h
 }
-
 void sampleWind(void)
 {
     int16_t pulseCount = 0;
