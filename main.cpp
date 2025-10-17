@@ -7,11 +7,11 @@
 #include <ArduinoJson.h>                       // JSON library
 #include <Adafruit_BME280.h>                   // BME280 sensor 0x76
 #include <Credentials.h>                       // Credentials
-#include "iAQCoreTwoWire.h"                    // Air quality sensor 0x5A
 #include <SparkFun_VEML6075_Arduino_Library.h> // UV Sensor 0x10
 #include "SparkFun_AS3935.h"                   // Lightning sensor 0x03
 #include <BH1750.h>                            // Light sensor 0x23
 #include "AS5600.h"                            // Magnetic angle sensor 0x36
+#include <QMC5883LCompass.h>                   // Compass sensor 0x0D
 //----------------------------------------------------------------------------------------
 // Define constants
 #define PERIOD_MILLSEC_1000 1000
@@ -30,16 +30,19 @@
 #define RAIN_GAUGE_PIN      32
 #define LIGHTNING_INT_PIN   18
 
+#define BATT_VOLTAGE_MEAS_PIN       36
+#define BATT_VOLTAGE_MEAS_SWITCH    13
+
 //PCNT definitions
 #define WIND_PCNT_UNIT      PCNT_UNIT_0
 #define RAIN_PCNT_UNIT      PCNT_UNIT_1
-#define SAMPLE_INTERVAL_MS  1000                // sample interval in milliseconds
-#define SAMPLE_INTERVAL_MS  2000    // Mintavételezés 2 másodpercenként
-#define AVERAGING_PERIOD_MS 600000  // 10 perc = 600 000 ms
+#define SAMPLE_INTERVAL_MS  2000                // Mintavételezés 2 másodpercenként
+#define AVERAGING_PERIOD_MS 600000              // 10 perc = 600000 ms
 
 #define RADIUS_M            0.10f               // Forgás középpont – félgömb közepe távolság (m)
 #define IMPULSES_REV        1                   // Impulzus / fordulat
 #define SECONDS_IN_HOUR     3600.0f
+#define FRICTION_COMPENSATION  1.5f
 
 //----------------------------------------------------------------------------------------
 const char *ssid = WIFI_SSID;                   // WiFi SSID
@@ -64,10 +67,19 @@ int count = 0;
 int mqttCounterConn = 0;
 String UniqueId;
 
-
+// Wind sensor variables
 int16_t windCount = 0;
 int16_t rainCount = 0;
+int16_t windDirection = 0;
 Ticker sampleTimer;
+Ticker reportTimer;
+
+volatile int32_t totalPulses = 0;
+volatile int16_t lastSamplePulses = 0;
+volatile float maxSpeed = 0.0f;
+volatile float avgSpeed = 0.0f;
+volatile uint32_t sampleCount = 0;
+
 
 // BME280 Sensor
 Adafruit_BME280 bme;
@@ -108,10 +120,17 @@ const float UVA_IR_COEF_B = 1.33;
 const float UVB_VIS_COEF_C = 2.95;
 const float UVB_IR_COEF_D = 1.75;
 
-//AS5600
-//AS5600L as5600;
+//AS5600 Magnetic angle sensor
 AS5600 as5600;
 
+//QMC5883L Compass sensor
+QMC5883LCompass compass;
+uint8_t azimuth = 0;
+uint8_t sensor_orientation_offset = 0;
+
+//Battery voltage measurement
+uint16_t batteryVoltage_RawADC = 0;
+uint16_t batteryVoltage = 0;
 //----------------------------------------------------------------------------------------
 
 // Function declarations
@@ -122,40 +141,28 @@ void InitSensors(void);
 void readVEML6075(void);
 void readBH1750(void);
 void readBME280(void);
+void readQMC5883L(void);
 void printDebugInfo(void);
 void ICACHE_RAM_ATTR lightningISR(void);
 void setupWindPCNT(void);
 void setupRainPCNT(void);
 void readCounts(void);
+float calculateWindSpeedKmh(int16_t pulses, float intervalSec);
+void sampleWind(void);
+void reportWind(void);
+void batteryVoltageMeasurement(void);
+
 //----------------------------------------------------------------------------------------
 void setup()
 {
     Serial.begin(115200);
-    delay(500);
+    delay(200);
     Serial.print("Start");
-
     Wire.begin(21, 22);
-    Wire.setClock(100000); // iAQ-Core can operate at a maximum of 100kHz
+    //Wire.setClock(100000); // iAQ-Core can operate at a maximum of 100kHz
 
     InitSensors();
-    delay(100);
-
     setup_wifi();
-    delay(100);
-
-    pinMode(WIND_SPEED_PIN, INPUT_PULLUP);
-    pinMode(RAIN_GAUGE_PIN, INPUT_PULLUP);
-    setupWindPCNT();
-    setupRainPCNT();
-    sampleTimer.attach_ms(SAMPLE_INTERVAL_MS, readCounts);
-
-
-    as5600.setDirection(AS5600_CLOCK_WISE);  //  default, just be explicit.
-    int b = as5600.isConnected();
-    Serial.print("Connect: ");
-    Serial.println(b);
-    delay(1000);
-
 
     mqttPubSub.setServer(mqtt_server, mqttPort);
     mqttPubSub.setCallback(MqttReceiverCallback);
@@ -175,6 +182,9 @@ void loop()
         setup_wifi();
     }
 
+    
+
+    //if (millis() - Time > 10000)
     if (millis() - Time > 10000)
     {
         Time = millis();
@@ -186,8 +196,10 @@ void loop()
             readVEML6075();
             readBH1750();
             readBME280();
-            
-            printDebugInfo();
+            readQMC5883L();
+            windDirection = (as5600.rawAngle() * AS5600_RAW_TO_DEGREES);
+            batteryVoltageMeasurement();
+            //printDebugInfo();
 
             // JSON payload építése
             StaticJsonDocument<600> doc;
@@ -196,7 +208,11 @@ void loop()
             doc["atmospheric_pressure"] = pressure;
             doc["lux"] = lux;
             doc["uvi"] = uvi;
-
+            doc["wind_speed"] = avgSpeed;
+            doc["wind_direction"] = windDirection;
+            doc["azimuth"] = azimuth;
+            doc["rainfall"] = rainCount;
+            
             
             if (distance > 0)
             {
@@ -215,10 +231,6 @@ void loop()
                 doc["disturber"] = disturber_flag;
             }
             
-
-
-
-            
             char jsonBuffer[600];
             serializeJson(doc, jsonBuffer);
 
@@ -231,13 +243,14 @@ void loop()
             //Serial.print(": ");
             //Serial.println(jsonBuffer);
 
-            distance = 0; // Reset distance for next loop
-            lightEnergy = 0; // Reset light energy for next loop
-            noise_flag = 0; // Reset noise flag for next loop
-            disturber_flag = 0; // Reset disturber flag for next loop
+            distance = 0;
+            lightEnergy = 0;
+            noise_flag = 0;
+            disturber_flag = 0;
         }
     }
-    else if (lightningDetected)
+    //else if (lightningDetected)
+    if (lightningDetected)
     {
         lightningDetected = false;
         delay(2); // 2ms delay minimum to allow the sensor to process the interrupt
@@ -508,11 +521,37 @@ void InitSensors(void)
     }
     else
     {
-        Serial.println(F("Error initialising BH1750"));
+        Serial.println(F("Error initialising BH1750!"));
     }
 
+    // Compass sensor init
+    compass.init();
 
-    delay(1000); // Wait for the sensor to stabilize
+    // Wind and rain sensor init
+    pinMode(WIND_SPEED_PIN, INPUT_PULLUP);
+    pinMode(RAIN_GAUGE_PIN, INPUT_PULLUP);
+    setupWindPCNT();
+    setupRainPCNT();
+    //sampleTimer.attach_ms(SAMPLE_INTERVAL_MS, readCounts);
+    sampleTimer.attach_ms(SAMPLE_INTERVAL_MS, sampleWind);
+    reportTimer.attach_ms(AVERAGING_PERIOD_MS, reportWind);
+
+    // AS5600 Magnetic angle sensor init
+    as5600.setDirection(AS5600_CLOCK_WISE);  //  default, just be explicit.
+    int b = as5600.isConnected();
+    if (b == 1)
+    {
+        Serial.println("AS5600 Initialized");
+    }
+    else
+    {
+        Serial.println("AS5600 Error!");
+    }
+
+    //Battery voltage measurement
+    pinMode(BATT_VOLTAGE_MEAS_PIN, INPUT);
+    pinMode(BATT_VOLTAGE_MEAS_SWITCH, OUTPUT);
+    delay(500); // Wait for the sensor to stabilize
 }
 void readVEML6075(void)
 {
@@ -536,19 +575,15 @@ void readVEML6075(void)
 
     // UVI átlagolt
     uvi = (uvia + uvib) / 2.0;
-
-    Serial.print("UVIA: "); Serial.print(uvia);
-    Serial.print(", UVIB: "); Serial.print(uvib);
-    Serial.print(", UVI: "); Serial.println(uvi);
 }
 void readBH1750(void)
 {
     if (lightMeter.measurementReady())
     {
         lux = lightMeter.readLightLevel();
-        Serial.print("Light: ");
+        /*Serial.print("Light: ");
         Serial.print(lux);
-        Serial.println(" lx");
+        Serial.println(" lx");*/
     }
 }
 void readBME280(void)
@@ -557,9 +592,15 @@ void readBME280(void)
     humidity = bme.readHumidity();
     pressure = bme.readPressure() / 100.0F;
 }
+void readQMC5883L(void)
+{
+    compass.read();
+    //azimuth = (compass.getAzimuth() + sensor_orientation_offset);     //TODO if azimuth>360 azimuth=azimuth-360;
+    azimuth = compass.getAzimuth();
+}
 void printDebugInfo(void)
 {
-    Serial.print("Temperature: ");
+    /*Serial.print("Temperature: ");
     Serial.print(temperature);
     Serial.println(" °C");
 
@@ -570,8 +611,32 @@ void printDebugInfo(void)
     Serial.print("Pressure: ");
     Serial.print(pressure);
     Serial.println(" hPa");
+
+    Serial.print("UVIA: "); Serial.print(uvia);
+    Serial.print(", UVIB: "); Serial.print(uvib);
+    Serial.print(", UVI: "); Serial.println(uvi);
+
+    Serial.print("Light: ");
+    Serial.print(lux);
+    Serial.println(" lx");
     
-    Serial.print(as5600.readAngle());
+    Serial.print("Wind direction: ");
+    Serial.print(windDirection);
+    Serial.println("°");*/
+
+    Serial.print("Wind speed: ");
+    Serial.print(avgSpeed);
+    Serial.println("km/h");
+    
+    /*Serial.print("Rainfall: ");
+    Serial.print(rainCount);
+    Serial.println("mm");
+
+    Serial.print("Azimuth: ");
+    Serial.println(azimuth)
+    
+    Serial.print("Battery voltage: ");
+    Serial.print(batteryVoltage); Serial.println(" mV");*/
 
     /*Serial.print("MQTT: Send Data -> ");
     Serial.print(topic);
@@ -605,8 +670,6 @@ void setupWindPCNT(void)
     pcnt_counter_clear(WIND_PCNT_UNIT);
     pcnt_counter_resume(WIND_PCNT_UNIT);
 }
-
-// ---------- Esőmérő PCNT konfigurálása ----------
 void setupRainPCNT(void)
 {
     pcnt_config_t pcnt_config =
@@ -630,24 +693,73 @@ void setupRainPCNT(void)
     pcnt_counter_clear(RAIN_PCNT_UNIT);
     pcnt_counter_resume(RAIN_PCNT_UNIT);
 }
-
-// ---------- Mintavétel mindkét számlálóra ----------
 void readCounts(void)
 {
-    pcnt_get_counter_value(WIND_PCNT_UNIT, &windCount);
-    pcnt_get_counter_value(RAIN_PCNT_UNIT, &rainCount);
+    //pcnt_get_counter_value(WIND_PCNT_UNIT, &windCount);
+    //pcnt_get_counter_value(RAIN_PCNT_UNIT, &rainCount);
 
-    Serial.print("[Szél] Pulzusok: ");
-    Serial.print(windCount);
-    Serial.print("    |    [Eső] Pulzusok: ");
-    Serial.println(rainCount);
+    windDirection = (as5600.rawAngle() * AS5600_RAW_TO_DEGREES);
 
     // ✏️ Itt számolhatod tovább: windCount → km/h, rainCount → mm / liter stb.
-
-    // Számlálók nullázása következő ciklushoz
-    pcnt_counter_clear(WIND_PCNT_UNIT);
+    //pcnt_counter_clear(WIND_PCNT_UNIT);
     pcnt_counter_clear(RAIN_PCNT_UNIT);
+}
+float calculateWindSpeedKmh(int16_t totalPulses, float intervalSec)
+{
+    float revolutions = (float)totalPulses / IMPULSES_REV;
+    float circumference = 2.0f * PI * RADIUS_M;
+    float distance = revolutions * circumference;   // méter / intervallum
+    float avgSpeed_m_s = distance / (intervalSec);       // m/s
+    float avgSpeed_kmh = avgSpeed_m_s * 3.6f * FRICTION_COMPENSATION; // km/h
+    return avgSpeed_kmh;                            // km/h
+}
 
-    //Serial.print(as5600.readAngle());
-    Serial.println(as5600.rawAngle() * AS5600_RAW_TO_DEGREES);
+void sampleWind(void)
+{
+    int16_t pulseCount = 0;
+    pcnt_get_counter_value(WIND_PCNT_UNIT, (int16_t *)&pulseCount);
+    pcnt_counter_clear(WIND_PCNT_UNIT);
+
+    totalPulses += pulseCount;
+    sampleCount++;
+
+    float intervalSec = SAMPLE_INTERVAL_MS / 1000.0f;
+    float currentSpeed = calculateWindSpeedKmh(pulseCount, intervalSec);
+
+    if (currentSpeed > maxSpeed)
+    {
+        maxSpeed = currentSpeed;
+    }
+
+    Serial.printf("Pillanatnyi sebesseg: %.2f km/h\n", currentSpeed);
+}
+void reportWind(void)
+{
+    float totalTimeSec = AVERAGING_PERIOD_MS / 1000.0f;  // 600 s
+    float revolutions = (float)totalPulses / IMPULSES_REV;
+    float circumference = 2.0f * PI * RADIUS_M;
+    float distance = revolutions * circumference;   // méter 10 perc alatt
+    avgSpeed = (distance / totalTimeSec) * 3.6f; // km/h
+
+    Serial.println("\n===== 10 perces meresi ciklus eredmenye =====");
+    Serial.printf("Osszes impulzus: %ld\n", totalPulses);
+    Serial.printf("Atlagos szelsebesseg: %.4f km/h\n", avgSpeed);
+    Serial.printf("Maximalis szelsebesseg: %.2f km/h\n", maxSpeed);
+    Serial.println("==============================================\n");
+
+    // Új ciklushoz nullázás
+    totalPulses = 0;
+    sampleCount = 0;
+    maxSpeed = 0.0f;
+}
+void batteryVoltageMeasurement(void)
+{
+    digitalWrite(BATT_VOLTAGE_MEAS_SWITCH, HIGH);
+    delay(10);
+    batteryVoltage_RawADC = analogRead(BATT_VOLTAGE_MEAS_PIN);
+    digitalWrite(BATT_VOLTAGE_MEAS_SWITCH, LOW);
+    batteryVoltage = (batteryVoltage_RawADC * 2 * 1.1 * 1000) / 4095; //mV
+    /*Serial.print("Battery voltage: ");
+    Serial.print(batteryVoltage); Serial.println(" mV");*/
+
 }
