@@ -14,35 +14,35 @@
 #include <QMC5883LCompass.h>                   // Compass sensor 0x0D
 //----------------------------------------------------------------------------------------
 // Define constants
-#define PERIOD_MILLSEC_1000 1000
-#define PERIOD_MILLSEC_500  500
-#define PERIOD_MILLSEC_250  250
+#define PERIOD_MILLSEC_1000         1000
+#define PERIOD_MILLSEC_500          500
+#define PERIOD_MILLSEC_250          250
 
-#define AS3935_ADDR         0x03
-#define INDOOR              0x12
-#define OUTDOOR             0xE
-#define LIGHTNING_INT       0x08
-#define DISTURBER_INT       0x04
-#define NOISE_INT           0x01
+#define AS3935_ADDR                 0x03
+#define INDOOR                      0x12
+#define OUTDOOR                     0xE
+#define LIGHTNING_INT               0x08
+#define DISTURBER_INT               0x04
+#define NOISE_INT                   0x01
 
-#define WIND_SPEED_PIN      23
-#define WIND_DIRECTION_PIN  19
-#define RAIN_GAUGE_PIN      32
-#define LIGHTNING_INT_PIN   18
+#define WIND_SPEED_PIN              23
+#define WIND_DIRECTION_PIN          19
+#define RAIN_GAUGE_PIN              32
+#define LIGHTNING_INT_PIN           18
 
 #define BATT_VOLTAGE_MEAS_PIN       36
 #define BATT_VOLTAGE_MEAS_SWITCH    13
 
 //PCNT definitions
-#define WIND_PCNT_UNIT      PCNT_UNIT_0
-#define RAIN_PCNT_UNIT      PCNT_UNIT_1
-#define SAMPLE_INTERVAL_MS  2000                // Mintavételezés 2 másodpercenként
-#define AVERAGING_PERIOD_MS 600000              // 10 perc = 600000 ms
+#define WIND_PCNT_UNIT              PCNT_UNIT_0
+#define RAIN_PCNT_UNIT              PCNT_UNIT_1
+#define SAMPLE_INTERVAL_MS          2000                // Mintavételezés 2 másodpercenként
+#define AVERAGING_PERIOD_MS         600000              // 10 perc = 600000 ms
 
-#define RADIUS_M            0.10f               // Forgás középpont – félgömb közepe távolság (m)
-#define IMPULSES_REV        1                   // Impulzus / fordulat
-#define SECONDS_IN_HOUR     3600.0f
-#define FRICTION_COMPENSATION  1.5f
+#define RADIUS_M                    0.10f               // Forgás középpont – félgömb közepe távolság (m)
+#define IMPULSES_REV                1                   // Impulzus / fordulat
+#define SECONDS_IN_HOUR             3600.0f
+#define FRICTION_COMPENSATION       1.5f
 
 //----------------------------------------------------------------------------------------
 const char *ssid = WIFI_SSID;                   // WiFi SSID
@@ -62,8 +62,9 @@ String mqttStatusTopic = "esp32iotsensor/" + deviceName; // MQTT Topic
 // Global variables
 WiFiClient WiFiClient;
 PubSubClient mqttPubSub(WiFiClient);
-unsigned long Time = 0;
-int count = 0;
+//unsigned long Time = 0;
+//int count = 0;
+
 int mqttCounterConn = 0;
 String UniqueId;
 
@@ -73,6 +74,10 @@ int16_t rainCount = 0;
 int16_t windDirection = 0;
 Ticker sampleTimer;
 Ticker reportTimer;
+
+// Új: periódikus ticker a teljes mérés/publish időzítésére
+Ticker periodicTimer;
+volatile bool measurementDue = false;
 
 volatile int32_t totalPulses = 0;
 volatile int16_t lastSamplePulses = 0;
@@ -142,6 +147,7 @@ void readVEML6075(void);
 void readBH1750(void);
 void readBME280(void);
 void readQMC5883L(void);
+void readWindDirection(void);
 void printDebugInfo(void);
 void ICACHE_RAM_ATTR lightningISR(void);
 void setupWindPCNT(void);
@@ -151,7 +157,8 @@ float calculateWindSpeedKmh(int16_t pulses, float intervalSec);
 void sampleWind(void);
 void reportWind(void);
 void batteryVoltageMeasurement(void);
-
+void performPeriodicMeasurement(void);
+void IRAM_ATTR periodicTickerCallback(void);
 //----------------------------------------------------------------------------------------
 void setup()
 {
@@ -161,6 +168,10 @@ void setup()
 
     mqttPubSub.setServer(mqtt_server, mqttPort);
     mqttPubSub.setCallback(mqttReceiverCallback);
+
+    // Periodikus mérés: 60 000 ms = 60 s (ugyanaz, mint eredetileg: 6 * 10s)
+    // A ticker csak beállít egy flag-et (measurementDue), a tényleges mérés a loop()-ban lesz.
+    periodicTimer.attach_ms(AVERAGING_PERIOD_MS, periodicTickerCallback);
 }
 
 void loop()
@@ -168,19 +179,27 @@ void loop()
     if (WiFi.status() == WL_CONNECTED)
     {
         if (!mqttPubSub.connected())
+        {
             mqttReconnect();
+        }
         else
+        {
             mqttPubSub.loop();
+        }
     }
     else
     {
         setup_wifi();
     }
 
-    
+    // Ha a ticker jelezte, hogy mérés esedékes - végezd el itt (nem megszakításban)
+    if (measurementDue)
+    {
+        measurementDue = false;
+        performPeriodicMeasurement();
+    }
 
-    //if (millis() - Time > 10000)
-    if (millis() - Time > 10000)
+    /*if (millis() - Time > 10000)
     {
         Time = millis();
 
@@ -192,7 +211,7 @@ void loop()
             readBH1750();
             readBME280();
             readQMC5883L();
-            windDirection = (as5600.rawAngle() * AS5600_RAW_TO_DEGREES);
+            readWindDirection();
             batteryVoltageMeasurement();
             //printDebugInfo();
 
@@ -243,8 +262,8 @@ void loop()
             noise_flag = 0;
             disturber_flag = 0;
         }
-    }
-    //else if (lightningDetected)
+    }*/
+    
     if (lightningDetected)
     {
         lightningDetected = false;
@@ -592,6 +611,10 @@ void readQMC5883L(void)
     //azimuth = (compass.getAzimuth() + sensor_orientation_offset);     //TODO if azimuth>360 azimuth=azimuth-360;
     azimuth = compass.getAzimuth();
 }
+void readWindDirection(void)
+{
+    windDirection = (as5600.rawAngle() * AS5600_RAW_TO_DEGREES);
+}
 void printDebugInfo(void)
 {
     /*Serial.print("Temperature: ");
@@ -724,7 +747,7 @@ void sampleWind(void)
         maxSpeed = currentSpeed;
     }
 
-    Serial.printf("Pillanatnyi sebesseg: %.2f km/h\n", currentSpeed);
+    //Serial.printf("Pillanatnyi sebesseg: %.2f km/h\n", currentSpeed);
 }
 void reportWind(void)
 {
@@ -755,4 +778,75 @@ void batteryVoltageMeasurement(void)
     /*Serial.print("Battery voltage: ");
     Serial.print(batteryVoltage); Serial.println(" mV");*/
 
+}
+void IRAM_ATTR periodicTickerCallback(void)
+{
+    measurementDue = true;
+}
+// A tényleges periodikus mérés és MQTT publikálás (ez fut a fő ciklusból, nem megszakításból)
+void performPeriodicMeasurement(void)
+{
+    //Szenzorok olvasása
+    readVEML6075();
+    readBH1750();
+    readBME280();
+    readQMC5883L();
+    readWindDirection();
+    batteryVoltageMeasurement();
+    //printDebugInfo();
+
+    // JSON payload építése
+    StaticJsonDocument<600> doc;
+    doc["temperature"] = temperature;
+    doc["humidity"] = humidity;
+    doc["atmospheric_pressure"] = pressure;
+    doc["lux"] = lux;
+    doc["uvi"] = uvi;
+    doc["wind_speed"] = avgSpeed;
+    doc["wind_direction"] = windDirection;
+    doc["azimuth"] = azimuth;
+    doc["rainfall"] = rainCount;
+
+
+    if (distance > 0)
+    {
+        doc["lightningdistance"] = distance;
+    }
+    if (lightEnergy > 0)
+    {
+        doc["lightningenergy"] = lightEnergy;
+    }
+    if (noise_flag > 0)
+    {
+        doc["noise"] = noise_flag;
+    }
+    if (disturber_flag > 0)
+    {
+        doc["disturber"] = disturber_flag;
+    }
+
+    char jsonBuffer[600];
+    serializeJson(doc, jsonBuffer);
+
+    // Publish
+    const char *topic = "office/sensor/demo/state";
+    if (mqttPubSub.connected())
+    {
+        mqttPubSub.publish(topic, jsonBuffer);
+    }
+    else
+    {
+        Serial.println("MQTT not connected, skipping publish.");
+    }
+
+    Serial.print("MQTT: Send Data -> ");
+    //Serial.print(topic);
+    //Serial.print(": ");
+    //Serial.println(jsonBuffer);
+
+    // reset event-specific fields
+    distance = 0;
+    lightEnergy = 0;
+    noise_flag = 0;
+    disturber_flag = 0;
 }
