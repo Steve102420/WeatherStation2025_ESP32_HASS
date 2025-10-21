@@ -44,6 +44,12 @@
 #define SECONDS_IN_HOUR             3600.0f
 #define FRICTION_COMPENSATION       1.5f
 
+// Esőmérő konfiguráció
+// Állítsd a következőt a saját tipping-bucket esőmérőd specifikációjára!
+// Példa: ha 1 tip = 0.2 mm -> MM_PER_TIP = 0.2f
+#define MM_PER_TIP                  0.2f
+
+
 //----------------------------------------------------------------------------------------
 const char *ssid = WIFI_SSID;                   // WiFi SSID
 const char *password = WIFI_PASSWORD;           // WiFi Password
@@ -62,8 +68,6 @@ String mqttStatusTopic = "esp32iotsensor/" + deviceName; // MQTT Topic
 // Global variables
 WiFiClient WiFiClient;
 PubSubClient mqttPubSub(WiFiClient);
-//unsigned long Time = 0;
-//int count = 0;
 
 int mqttCounterConn = 0;
 String UniqueId;
@@ -85,6 +89,10 @@ volatile float maxSpeed = 0.0f;
 volatile float avgSpeed = 0.0f;
 volatile uint32_t sampleCount = 0;
 
+// Rainfall measurement
+volatile int32_t totalRainPulses = 0;     // összegyűjtött tipping impulsek a periódus alatt
+volatile int16_t lastSampleRainPulses = 0;
+volatile float rainfall_mm = 0.0f;
 
 // BME280 Sensor
 Adafruit_BME280 bme;
@@ -169,8 +177,6 @@ void setup()
     mqttPubSub.setServer(mqtt_server, mqttPort);
     mqttPubSub.setCallback(mqttReceiverCallback);
 
-    // Periodikus mérés: 60 000 ms = 60 s (ugyanaz, mint eredetileg: 6 * 10s)
-    // A ticker csak beállít egy flag-et (measurementDue), a tényleges mérés a loop()-ban lesz.
     periodicTimer.attach_ms(AVERAGING_PERIOD_MS, periodicTickerCallback);
 }
 
@@ -198,71 +204,6 @@ void loop()
         measurementDue = false;
         performPeriodicMeasurement();
     }
-
-    /*if (millis() - Time > 10000)
-    {
-        Time = millis();
-
-        if (count++ == 5)
-        {
-            count = 0;
-
-            readVEML6075();
-            readBH1750();
-            readBME280();
-            readQMC5883L();
-            readWindDirection();
-            batteryVoltageMeasurement();
-            //printDebugInfo();
-
-            // JSON payload építése
-            StaticJsonDocument<600> doc;
-            doc["temperature"] = temperature;
-            doc["humidity"] = humidity;
-            doc["atmospheric_pressure"] = pressure;
-            doc["lux"] = lux;
-            doc["uvi"] = uvi;
-            doc["wind_speed"] = avgSpeed;
-            doc["wind_direction"] = windDirection;
-            doc["azimuth"] = azimuth;
-            doc["rainfall"] = rainCount;
-            
-            
-            if (distance > 0)
-            {
-                doc["lightningdistance"] = distance;
-            }
-            if (lightEnergy > 0)
-            {
-                doc["lightningenergy"] = lightEnergy;
-            }
-            if (noise_flag > 0)
-            {
-                doc["noise"] = noise_flag;
-            }
-            if (disturber_flag > 0)
-            {
-                doc["disturber"] = disturber_flag;
-            }
-            
-            char jsonBuffer[600];
-            serializeJson(doc, jsonBuffer);
-
-            // Publish
-            const char *topic = "office/sensor/demo/state";
-            mqttPubSub.publish(topic, jsonBuffer);
-
-            //Serial.print("MQTT: Send Data -> ");
-            //Serial.print(topic);
-            //Serial.print(": ");
-            //Serial.println(jsonBuffer);
-
-            distance = 0;
-            lightEnergy = 0;
-            noise_flag = 0;
-            disturber_flag = 0;
-        }
-    }*/
     
     if (lightningDetected)
     {
@@ -746,8 +687,40 @@ void sampleWind(void)
     {
         maxSpeed = currentSpeed;
     }
+    Serial.printf("Pillanatnyi sebesseg: %.2f km/h\n", currentSpeed);
+    
+    
 
-    //Serial.printf("Pillanatnyi sebesseg: %.2f km/h\n", currentSpeed);
+
+
+    // Eső mintavétel: olvassuk le a RAIN PCNT számlálót, adjuk hozzá a periódus összegéhez
+    int16_t rainPulseSample = 0;
+    pcnt_get_counter_value(RAIN_PCNT_UNIT, &rainPulseSample);
+    pcnt_counter_clear(RAIN_PCNT_UNIT);
+
+    // Lokális változó frissítése (utolsó minta, ha akarod megjeleníteni)
+    rainCount = rainPulseSample;
+    Serial.printf("Pillanatnyi esomennyiseg: %.2f mm\n", rainCount);
+
+    // Összegzés a periódus alatt (atomikusság feltételezve; ha kell, használj lock-ot)
+    totalRainPulses += rainPulseSample;
+    lastSampleRainPulses = rainPulseSample;
+
+    Serial.printf("Pillanatnyi sebesseg: %.2f km/h, pillanatnyi esotel: %d impulzus\n", currentSpeed, rainPulseSample);
+
+
+
+
+
+
+
+
+
+
+
+    
+    
+    
 }
 void reportWind(void)
 {
@@ -757,16 +730,25 @@ void reportWind(void)
     float distance = revolutions * circumference;   // méter 10 perc alatt
     avgSpeed = (distance / totalTimeSec) * 3.6f; // km/h
 
+    // Eső: számítás mm-ben
+    // Eső: kiszámoljuk az eddig összegyűlt impulzusok alapján (periódus alatt)
+    rainfall_mm = (float)totalRainPulses * MM_PER_TIP;
+
     Serial.println("\n===== 10 perces meresi ciklus eredmenye =====");
-    Serial.printf("Osszes impulzus: %ld\n", totalPulses);
+    Serial.printf("Osszes impulzus (szel): %ld\n", totalPulses);
     Serial.printf("Atlagos szelsebesseg: %.4f km/h\n", avgSpeed);
     Serial.printf("Maximalis szelsebesseg: %.2f km/h\n", maxSpeed);
+    Serial.printf("Osszes impulzus (eso): %ld -> %.2f mm\n", totalRainPulses, rainfall_mm);
     Serial.println("==============================================\n");
 
     // Új ciklushoz nullázás
     totalPulses = 0;
     sampleCount = 0;
     maxSpeed = 0.0f;
+
+    totalRainPulses = 0;
+    lastSampleRainPulses = 0;
+    rainCount = 0;
 }
 void batteryVoltageMeasurement(void)
 {
@@ -805,7 +787,7 @@ void performPeriodicMeasurement(void)
     doc["wind_speed"] = avgSpeed;
     doc["wind_direction"] = windDirection;
     doc["azimuth"] = azimuth;
-    doc["rainfall"] = rainCount;
+    doc["rainfall"] = rainfall_mm;
 
 
     if (distance > 0)
