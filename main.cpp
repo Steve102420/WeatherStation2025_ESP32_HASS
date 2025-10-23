@@ -47,7 +47,7 @@
 // Esőmérő konfiguráció
 // Állítsd a következőt a saját tipping-bucket esőmérőd specifikációjára!
 // Példa: ha 1 tip = 0.2 mm -> MM_PER_TIP = 0.2f
-#define MM_PER_TIP                  0.2f
+#define MM_PER_TIP                  1.0f
 
 
 //----------------------------------------------------------------------------------------
@@ -83,16 +83,16 @@ Ticker reportTimer;
 Ticker periodicTimer;
 volatile bool measurementDue = false;
 
-volatile int32_t totalPulses = 0;
-volatile int16_t lastSamplePulses = 0;
+volatile int32_t totalWindPulses = 0;
+volatile int16_t lastSampleWindPulses = 0;
 volatile float maxSpeed = 0.0f;
 volatile float avgSpeed = 0.0f;
 volatile uint32_t sampleCount = 0;
 
 // Rainfall measurement
-volatile int32_t totalRainPulses = 0;     // összegyűjtött tipping impulsek a periódus alatt
-volatile int16_t lastSampleRainPulses = 0;
+volatile int32_t totalRainPulses = 0;
 volatile float rainfall_mm = 0.0f;
+volatile int16_t lastSampleRainPulses = 0;
 
 // BME280 Sensor
 Adafruit_BME280 bme;
@@ -162,8 +162,8 @@ void setupWindPCNT(void);
 void setupRainPCNT(void);
 void readCounts(void);
 float calculateWindSpeedKmh(int16_t pulses, float intervalSec);
-void sampleWind(void);
-void reportWind(void);
+void sampleCounts(void);
+void reportCounts(void);
 void batteryVoltageMeasurement(void);
 void performPeriodicMeasurement(void);
 void IRAM_ATTR periodicTickerCallback(void);
@@ -487,8 +487,8 @@ void initSensors(void)
     setupWindPCNT();
     setupRainPCNT();
     //sampleTimer.attach_ms(SAMPLE_INTERVAL_MS, readCounts);
-    sampleTimer.attach_ms(SAMPLE_INTERVAL_MS, sampleWind);
-    reportTimer.attach_ms(AVERAGING_PERIOD_MS, reportWind);
+    sampleTimer.attach_ms(SAMPLE_INTERVAL_MS, sampleCounts);
+    reportTimer.attach_ms(AVERAGING_PERIOD_MS, reportCounts);
 
     // AS5600 Magnetic angle sensor init
     as5600.setDirection(AS5600_CLOCK_WISE);  //  default, just be explicit.
@@ -645,7 +645,7 @@ void setupRainPCNT(void)
     };
 
     pcnt_unit_config(&pcnt_config);
-    pcnt_set_filter_value(RAIN_PCNT_UNIT, 1000);
+    pcnt_set_filter_value(RAIN_PCNT_UNIT, 10);
     pcnt_filter_enable(RAIN_PCNT_UNIT);
     pcnt_counter_pause(RAIN_PCNT_UNIT);
     pcnt_counter_clear(RAIN_PCNT_UNIT);
@@ -671,61 +671,45 @@ float calculateWindSpeedKmh(int16_t totalPulses, float intervalSec)
     float avgSpeed_kmh = avgSpeed_m_s * 3.6f * FRICTION_COMPENSATION; // km/h
     return avgSpeed_kmh;                            // km/h
 }
-void sampleWind(void)
+void sampleCounts(void)
 {
-    int16_t pulseCount = 0;
-    pcnt_get_counter_value(WIND_PCNT_UNIT, (int16_t *)&pulseCount);
+    //Wind speed calculation
+    int16_t pulseCountWind = 0;
+    pcnt_get_counter_value(WIND_PCNT_UNIT, (int16_t *)&pulseCountWind);
     pcnt_counter_clear(WIND_PCNT_UNIT);
-
-    totalPulses += pulseCount;
-    sampleCount++;
+    totalWindPulses += pulseCountWind;
+    
 
     float intervalSec = SAMPLE_INTERVAL_MS / 1000.0f;
-    float currentSpeed = calculateWindSpeedKmh(pulseCount, intervalSec);
+    float currentSpeed = calculateWindSpeedKmh(pulseCountWind, intervalSec);
 
     if (currentSpeed > maxSpeed)
     {
         maxSpeed = currentSpeed;
     }
-    Serial.printf("Pillanatnyi sebesseg: %.2f km/h\n", currentSpeed);
+    //Serial.printf("Pillanatnyi szelsebesseg: %.2f km/h\n", currentSpeed);
     
     
-
-
-
-    // Eső mintavétel: olvassuk le a RAIN PCNT számlálót, adjuk hozzá a periódus összegéhez
-    int16_t rainPulseSample = 0;
-    pcnt_get_counter_value(RAIN_PCNT_UNIT, &rainPulseSample);
+    //Rainfall calculation
+    int16_t pulseCountRain = 0;
+    pcnt_get_counter_value(RAIN_PCNT_UNIT, &pulseCountRain);
     pcnt_counter_clear(RAIN_PCNT_UNIT);
-
-    // Lokális változó frissítése (utolsó minta, ha akarod megjeleníteni)
-    rainCount = rainPulseSample;
-    Serial.printf("Pillanatnyi esomennyiseg: %.2f mm\n", rainCount);
-
-    // Összegzés a periódus alatt (atomikusság feltételezve; ha kell, használj lock-ot)
-    totalRainPulses += rainPulseSample;
-    lastSampleRainPulses = rainPulseSample;
-
-    Serial.printf("Pillanatnyi sebesseg: %.2f km/h, pillanatnyi esotel: %d impulzus\n", currentSpeed, rainPulseSample);
+    totalRainPulses += pulseCountRain;
 
 
 
-
-
-
-
-
-
-
-
+    rainCount = pulseCountRain;
     
-    
-    
+    Serial.printf("Pillanatnyi esomennyiseg: %d mm\n", rainCount);
+    Serial.printf("Pillanatnyi szelsebesseg: %.2f km/h, pillanatnyi esomennyiseg: %d impulzus\n", currentSpeed, pulseCountRain);
+
+    pulseCountRain = 0;
+    sampleCount++;
 }
-void reportWind(void)
+void reportCounts(void)
 {
     float totalTimeSec = AVERAGING_PERIOD_MS / 1000.0f;  // 600 s
-    float revolutions = (float)totalPulses / IMPULSES_REV;
+    float revolutions = (float)totalWindPulses / IMPULSES_REV;
     float circumference = 2.0f * PI * RADIUS_M;
     float distance = revolutions * circumference;   // méter 10 perc alatt
     avgSpeed = (distance / totalTimeSec) * 3.6f; // km/h
@@ -735,19 +719,21 @@ void reportWind(void)
     rainfall_mm = (float)totalRainPulses * MM_PER_TIP;
 
     Serial.println("\n===== 10 perces meresi ciklus eredmenye =====");
-    Serial.printf("Osszes impulzus (szel): %ld\n", totalPulses);
+    Serial.printf("Osszes impulzus (szel): %ld\n", totalWindPulses);
     Serial.printf("Atlagos szelsebesseg: %.4f km/h\n", avgSpeed);
     Serial.printf("Maximalis szelsebesseg: %.2f km/h\n", maxSpeed);
     Serial.printf("Osszes impulzus (eso): %ld -> %.2f mm\n", totalRainPulses, rainfall_mm);
     Serial.println("==============================================\n");
 
     // Új ciklushoz nullázás
-    totalPulses = 0;
+    totalWindPulses = 0;
+    totalRainPulses = 0;
+    
+    lastSampleRainPulses = 0;
+    lastSampleWindPulses = 0;
+
     sampleCount = 0;
     maxSpeed = 0.0f;
-
-    totalRainPulses = 0;
-    lastSampleRainPulses = 0;
     rainCount = 0;
 }
 void batteryVoltageMeasurement(void)
@@ -831,4 +817,6 @@ void performPeriodicMeasurement(void)
     lightEnergy = 0;
     noise_flag = 0;
     disturber_flag = 0;
+
+    rainfall_mm = 0;
 }
