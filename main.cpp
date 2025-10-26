@@ -73,9 +73,7 @@ PubSubClient mqttPubSub(WiFiClient);
 int mqttCounterConn = 0;
 String UniqueId;
 
-// Wind sensor variables
-int16_t windCount = 0;
-int16_t rainCount = 0;
+
 int16_t windDirection = 0;
 Ticker sampleTimer;
 Ticker reportTimer;
@@ -106,7 +104,7 @@ float lux = 0;
 // Lightning sensor
 SparkFun_AS3935 lightning(AS3935_ADDR);
 const int lightningInt = LIGHTNING_INT_PIN;
-byte noiseFloor = 1;
+byte noiseFloor = 3;
 byte watchDogVal = 1;
 byte spike = 1;
 byte lightningThresh = 1;
@@ -168,6 +166,7 @@ void reportCounts(void);
 void batteryVoltageMeasurement(void);
 void performPeriodicMeasurement(void);
 void IRAM_ATTR periodicTickerCallback(void);
+float round2(float val);
 //----------------------------------------------------------------------------------------
 void setup()
 {
@@ -536,7 +535,7 @@ void readBH1750(void)
     if (lightMeter.measurementReady())
     {
         lux = lightMeter.readLightLevel();
-        if (lux <= 0)
+        if (lux < 0)
         {
             lux = 0;
             Serial.println("Error reading light level");
@@ -638,7 +637,7 @@ void setupWindPCNT(void)
     };
 
     pcnt_unit_config(&pcnt_config);
-    pcnt_set_filter_value(WIND_PCNT_UNIT, 1000);
+    pcnt_set_filter_value(WIND_PCNT_UNIT, 100);
     pcnt_filter_enable(WIND_PCNT_UNIT);
     pcnt_counter_pause(WIND_PCNT_UNIT);
     pcnt_counter_clear(WIND_PCNT_UNIT);
@@ -695,7 +694,6 @@ void sampleCounts(void)
     pcnt_counter_clear(WIND_PCNT_UNIT);
     totalWindPulses += pulseCountWind;
     
-
     float intervalSec = SAMPLE_INTERVAL_MS / 1000.0f;
     float currentSpeed = calculateWindSpeedKmh(pulseCountWind, intervalSec);
 
@@ -705,20 +703,13 @@ void sampleCounts(void)
     }
     //Serial.printf("Pillanatnyi szelsebesseg: %.2f km/h\n", currentSpeed);
     
-    
     //Rainfall calculation
     int16_t pulseCountRain = 0;
     pcnt_get_counter_value(RAIN_PCNT_UNIT, &pulseCountRain);
     pcnt_counter_clear(RAIN_PCNT_UNIT);
     totalRainPulses += pulseCountRain;
 
-
-
-    rainCount = pulseCountRain;
-    
-    Serial.printf("Pillanatnyi esomennyiseg: %d mm\n", rainCount);
-    Serial.printf("Pillanatnyi szelsebesseg: %.2f km/h, pillanatnyi esomennyiseg: %d impulzus\n", currentSpeed, pulseCountRain);
-
+    //Serial.printf("Pillanatnyi szelsebesseg: %.2f km/h, pillanatnyi esomennyiseg: %d impulzus\n", currentSpeed, pulseCountRain);
     pulseCountRain = 0;
     sampleCount++;
 }
@@ -734,7 +725,7 @@ void reportCounts(void)
 
     Serial.println("\n===== 10 perces meresi ciklus eredmenye =====");
     Serial.printf("Osszes impulzus (szel): %ld\n", totalWindPulses);
-    Serial.printf("Atlagos szelsebesseg: %.4f km/h\n", avgSpeed);
+    Serial.printf("Atlagos szelsebesseg: %.2f km/h\n", avgSpeed);
     Serial.printf("Maximalis szelsebesseg: %.2f km/h\n", maxSpeed);
     Serial.printf("Osszes impulzus (eso): %ld -> %.2f mm\n", totalRainPulses, rainfall_mm);
     Serial.println("==============================================\n");
@@ -747,7 +738,6 @@ void reportCounts(void)
 
     sampleCount = 0;
     maxSpeed = 0.0f;
-    rainCount = 0;
 }
 void batteryVoltageMeasurement(void)
 {
@@ -778,12 +768,12 @@ void performPeriodicMeasurement(void)
 
     // JSON payload építése
     StaticJsonDocument<600> doc;
-    doc["temperature"] = temperature;
-    doc["humidity"] = humidity;
+    doc["temperature"] = round2(temperature);
+    doc["humidity"] = round2(humidity);
     doc["atmospheric_pressure"] = pressure;
-    doc["lux"] = lux;
+    doc["lux"] = round2(lux);
     doc["uvi"] = uvi;
-    doc["wind_speed"] = avgSpeed;
+    doc["wind_speed"] = round2(avgSpeed);
     doc["wind_direction"] = windDirection;
     doc["azimuth"] = azimuth;
     doc["rainfall"] = rainfall_mm;
@@ -832,4 +822,8 @@ void performPeriodicMeasurement(void)
     disturber_flag = 0;
 
     rainfall_mm = 0;
+}
+float round2(float val)
+{
+    return roundf(val * 100.0f) / 100.0f;
 }
