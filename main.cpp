@@ -44,11 +44,12 @@
 #define SECONDS_IN_HOUR             3600.0f
 #define FRICTION_COMPENSATION       1.5f
 
-// Esőmérő konfiguráció
-// Állítsd a következőt a saját tipping-bucket esőmérőd specifikációjára!
-// Példa: ha 1 tip = 0.2 mm -> MM_PER_TIP = 0.2f
-#define MM_PER_TIP                  1.0f
-
+// Rain gauge constants
+#define FUNNEL_DIAMETER_MM      140.0f
+#define FUNNEL_RADIUS_CM        (FUNNEL_DIAMETER_MM / 20.0f)                        // 140mm -> 7cm
+#define FUNNEL_AREA_CM2         (3.1415926f * FUNNEL_RADIUS_CM * FUNNEL_RADIUS_CM)  // A = πr²
+#define ML_PER_TIP              4.29f                                               // 1 tip = ~4.29 ml
+#define MM_PER_TIP              ((ML_PER_TIP / FUNNEL_AREA_CM2) * 10.0f)            // 1 tip = ~0.279 mm
 
 //----------------------------------------------------------------------------------------
 const char *ssid = WIFI_SSID;                   // WiFi SSID
@@ -535,6 +536,21 @@ void readBH1750(void)
     if (lightMeter.measurementReady())
     {
         lux = lightMeter.readLightLevel();
+        if (lux <= 0)
+        {
+            lux = 0;
+            Serial.println("Error reading light level");
+            Serial.println("Resetting BH1750 sensor!");
+            // BH1750 reinit
+            if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE_2))
+            {
+                Serial.println(F("BH1750 Initialised!"));
+            }
+            else
+            {
+                Serial.println(F("Error initialising BH1750!"));
+            }
+        }
         /*Serial.print("Light: ");
         Serial.print(lux);
         Serial.println(" lx");*/
@@ -714,8 +730,6 @@ void reportCounts(void)
     float distance = revolutions * circumference;   // méter 10 perc alatt
     avgSpeed = (distance / totalTimeSec) * 3.6f; // km/h
 
-    // Eső: számítás mm-ben
-    // Eső: kiszámoljuk az eddig összegyűlt impulzusok alapján (periódus alatt)
     rainfall_mm = (float)totalRainPulses * MM_PER_TIP;
 
     Serial.println("\n===== 10 perces meresi ciklus eredmenye =====");
@@ -725,7 +739,6 @@ void reportCounts(void)
     Serial.printf("Osszes impulzus (eso): %ld -> %.2f mm\n", totalRainPulses, rainfall_mm);
     Serial.println("==============================================\n");
 
-    // Új ciklushoz nullázás
     totalWindPulses = 0;
     totalRainPulses = 0;
     
