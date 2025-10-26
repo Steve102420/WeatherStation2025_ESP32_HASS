@@ -83,7 +83,6 @@ Ticker periodicTimer;
 volatile bool measurementDue = false;
 
 volatile int32_t totalWindPulses = 0;
-volatile int16_t lastSampleWindPulses = 0;
 volatile float maxSpeed = 0.0f;
 volatile float avgSpeed = 0.0f;
 volatile uint32_t sampleCount = 0;
@@ -91,7 +90,6 @@ volatile uint32_t sampleCount = 0;
 // Rainfall measurement
 volatile int32_t totalRainPulses = 0;
 volatile float rainfall_mm = 0.0f;
-volatile int16_t lastSampleRainPulses = 0;
 
 // BME280 Sensor
 Adafruit_BME280 bme;
@@ -732,9 +730,6 @@ void reportCounts(void)
 
     totalWindPulses = 0;
     totalRainPulses = 0;
-    
-    lastSampleRainPulses = 0;
-    lastSampleWindPulses = 0;
 
     sampleCount = 0;
     maxSpeed = 0.0f;
