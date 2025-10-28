@@ -13,43 +13,40 @@
 #include "AS5600.h"                            // Magnetic angle sensor 0x36
 #include <QMC5883LCompass.h>                   // Compass sensor 0x0D
 //----------------------------------------------------------------------------------------
-// Define constants
-#define PERIOD_MILLSEC_1000         1000
-#define PERIOD_MILLSEC_500          500
-#define PERIOD_MILLSEC_250          250
 
-#define AS3935_ADDR                 0x03
-#define INDOOR                      0x12
-#define OUTDOOR                     0xE
-#define LIGHTNING_INT               0x08
-#define DISTURBER_INT               0x04
-#define NOISE_INT                   0x01
+#define AS3935_ADDR                     0x03
+#define INDOOR                          0x12
+#define OUTDOOR                         0xE
+#define LIGHTNING_INT                   0x08
+#define DISTURBER_INT                   0x04
+#define NOISE_INT                       0x01
 
-#define WIND_SPEED_PIN              23
-#define WIND_DIRECTION_PIN          19
-#define RAIN_GAUGE_PIN              32
-#define LIGHTNING_INT_PIN           18
+#define WIND_SPEED_PIN                  23
+#define WIND_DIRECTION_PIN              19
+#define RAIN_GAUGE_PIN                  32
+#define LIGHTNING_INT_PIN               18
 
-#define BATT_VOLTAGE_MEAS_PIN       36
-#define BATT_VOLTAGE_MEAS_SWITCH    13
+#define BATT_VOLTAGE_MEAS_PIN           36
+#define BATT_VOLTAGE_MEAS_SWITCH        13
 
 //PCNT definitions
-#define WIND_PCNT_UNIT              PCNT_UNIT_0
-#define RAIN_PCNT_UNIT              PCNT_UNIT_1
-#define SAMPLE_INTERVAL_MS          2000                // Mintavételezés 2 másodpercenként
-#define AVERAGING_PERIOD_MS         600000              // 10 perc = 600000 ms
+#define WIND_PCNT_UNIT                  PCNT_UNIT_0
+#define RAIN_PCNT_UNIT                  PCNT_UNIT_1
+#define SAMPLE_INTERVAL_MS              2000                // Mintavételezés 2 másodpercenként
+#define AVERAGING_PERIOD_MS             600000              // 10 perc = 600000 ms
+#define AS3935_CALIBRATION_PERIOD_MS    6000000              // 10 perc = 600000 ms
 
-#define RADIUS_M                    0.10f               // Forgás középpont – félgömb közepe távolság (m)
-#define IMPULSES_REV                1                   // Impulzus / fordulat
-#define SECONDS_IN_HOUR             3600.0f
-#define FRICTION_COMPENSATION       1.5f
+#define RADIUS_M                        0.10f               // Forgás középpont – félgömb közepe távolság (m)
+#define IMPULSES_REV                    1                   // Impulzus / fordulat
+#define SECONDS_IN_HOUR                 3600.0f
+#define FRICTION_COMPENSATION           1.5f
 
 // Rain gauge constants
-#define FUNNEL_DIAMETER_MM      140.0f
-#define FUNNEL_RADIUS_CM        (FUNNEL_DIAMETER_MM / 20.0f)                        // 140mm -> 7cm
-#define FUNNEL_AREA_CM2         (3.1415926f * FUNNEL_RADIUS_CM * FUNNEL_RADIUS_CM)  // A = πr²
-#define ML_PER_TIP              4.29f                                               // 1 tip = ~4.29 ml
-#define MM_PER_TIP              ((ML_PER_TIP / FUNNEL_AREA_CM2) * 10.0f)            // 1 tip = ~0.279 mm
+#define FUNNEL_DIAMETER_MM              140.0f
+#define FUNNEL_RADIUS_CM                (FUNNEL_DIAMETER_MM / 20.0f)                        // 140mm -> 7cm
+#define FUNNEL_AREA_CM2                 (3.1415926f * FUNNEL_RADIUS_CM * FUNNEL_RADIUS_CM)  // A = πr²
+#define ML_PER_TIP                      4.29f                                               // 1 tip = ~4.29 ml
+#define MM_PER_TIP                      ((ML_PER_TIP / FUNNEL_AREA_CM2) * 10.0f)            // 1 tip = ~0.279 mm
 
 //----------------------------------------------------------------------------------------
 const char *ssid = WIFI_SSID;                   // WiFi SSID
@@ -767,7 +764,7 @@ void performPeriodicMeasurement(void)
     doc["humidity"] = round2(humidity);
     doc["atmospheric_pressure"] = pressure;
     doc["lux"] = round2(lux);
-    doc["uvi"] = uvi;
+    doc["uvi"] = round2(uvi);
     doc["wind_speed"] = round2(avgSpeed);
     doc["wind_direction"] = windDirection;
     doc["azimuth"] = azimuth;
@@ -805,7 +802,7 @@ void performPeriodicMeasurement(void)
         Serial.println("MQTT not connected, skipping publish.");
     }
 
-    Serial.print("MQTT: Send Data -> ");
+    //Serial.print("MQTT: Send Data -> ");
     //Serial.print(topic);
     //Serial.print(": ");
     //Serial.println(jsonBuffer);
