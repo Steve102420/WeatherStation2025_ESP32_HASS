@@ -12,6 +12,7 @@
 #include <BH1750.h>                            // Light sensor 0x23
 #include "AS5600.h"                            // Magnetic angle sensor 0x36
 #include <QMC5883LCompass.h>                   // Compass sensor 0x0D
+#include <time.h>                              // NTP / time functions
 //----------------------------------------------------------------------------------------
 
 #define AS3935_ADDR                     0x03
@@ -87,6 +88,7 @@ volatile uint32_t sampleCount = 0;
 // Rainfall measurement
 volatile int32_t totalRainPulses = 0;
 volatile float rainfall_mm = 0.0f;
+volatile float daily_rainfall_mm = 0.0f;
 
 // BME280 Sensor
 Adafruit_BME280 bme;
@@ -137,6 +139,10 @@ uint8_t sensor_orientation_offset = 0;
 //Battery voltage measurement
 uint16_t batteryVoltage_RawADC = 0;
 uint16_t batteryVoltage = 0;
+
+//Time
+uint8_t timeValidFlag = 0;
+
 //----------------------------------------------------------------------------------------
 
 // Function declarations
@@ -162,6 +168,10 @@ void batteryVoltageMeasurement(void);
 void performPeriodicMeasurement(void);
 void IRAM_ATTR periodicTickerCallback(void);
 float round2(float val);
+void checkMidnightReset(void);
+uint8_t SyncTime_NTPtoESP(void);
+void setTimezone(String timezone);
+unsigned long getESPTime(void);
 //----------------------------------------------------------------------------------------
 void setup()
 {
@@ -263,6 +273,7 @@ void setup_wifi(void)
         Serial.println("WiFi connected");
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
+        SyncTime_NTPtoESP();
     }
     else
     {
@@ -705,7 +716,7 @@ void sampleCounts(void)
     totalRainPulses += pulseCountRain;
 
     //Serial.printf("Pillanatnyi szelsebesseg: %.2f km/h, pillanatnyi esomennyiseg: %d impulzus\n", currentSpeed, pulseCountRain);
-    pulseCountRain = 0;
+    //pulseCountRain = 0;
     sampleCount++;
 }
 void reportCounts(void)
@@ -717,6 +728,7 @@ void reportCounts(void)
     avgSpeed = (distance / totalTimeSec) * 3.6f; // km/h
 
     rainfall_mm = (float)totalRainPulses * MM_PER_TIP;
+    daily_rainfall_mm += rainfall_mm;
 
     Serial.println("\n===== 10 perces meresi ciklus eredmenye =====");
     Serial.printf("Osszes impulzus (szel): %ld\n", totalWindPulses);
@@ -749,6 +761,9 @@ void IRAM_ATTR periodicTickerCallback(void)
 // A tényleges periodikus mérés és MQTT publikálás (ez fut a fő ciklusból, nem megszakításból)
 void performPeriodicMeasurement(void)
 {
+    // Ellenőrizzük, hogy szükséges-e éjfélkor nullázni
+    checkMidnightReset();
+
     //Szenzorok olvasása
     readVEML6075();
     readBH1750();
@@ -769,7 +784,7 @@ void performPeriodicMeasurement(void)
     doc["wind_direction"] = windDirection;
     doc["azimuth"] = azimuth;
     doc["rainfall"] = rainfall_mm;
-
+    doc["daily_rainfall"] = daily_rainfall_mm;
 
     if (distance > 0)
     {
@@ -818,4 +833,96 @@ void performPeriodicMeasurement(void)
 float round2(float val)
 {
     return roundf(val * 100.0f) / 100.0f;
+}
+void checkMidnightReset(void)
+{
+    static int last_day = -1;
+    struct tm timeinfo;
+    getESPTime();
+
+    int today = timeinfo.tm_mday;
+    if (today != last_day)
+    {
+        // Ha last_day = -1 (induláskor), akkor is beállítjuk last_day-re a jelen napot,
+        // de NEM szeretnénk véletlenül törölni korábbi adatokat, ezért csak akkor nullázunk,
+        // ha last_day != -1 és más napra léptünk — ezt választás kérdése.
+        if (last_day != -1)
+        {
+            Serial.println("Új nap: napi esőmennyiség nullázása.");
+            daily_rainfall_mm = 0.0f;   // új nap → új esőmennyiség
+        }
+        else
+        {
+            // Indításnál beállítjuk, nem törlünk
+            Serial.println("Időszinkronizáció után beállítjuk a napi napot (indítás).");
+        }
+        last_day = today;
+    }
+}
+uint8_t SyncTime_NTPtoESP(void)
+{
+    int max_attempts = 50;
+    int attempts = 0;
+
+    while (attempts < max_attempts)
+    {
+        Serial.println("Attempt sync NTP to ESP time!");
+        configTime(3600, 3600, "hu.pool.ntp.org");  // First connect to NTP server, with 0 TZ offset
+        delay(100);
+        setTimezone("CET-1CEST,M3.5.0,M10.5.0/3");
+        delay(100);
+        
+        unsigned long currentTime = getESPTime();
+        
+        time_t now;
+        struct tm timeinfo;
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        
+        if ((0 == currentTime) || (timeinfo.tm_year == (1970 - 1900)) || (now < 0) || (timeinfo.tm_year > (2038 - 1900)))
+        {
+            Serial.println("NTP to ESP time sync failed!");
+            delay(100);
+            timeValidFlag = 0;
+            
+        }
+        else
+        {
+            Serial.println("NTP to ESP time sync succesfully finished!");
+            delay(100);
+            timeValidFlag = 1;
+            return 1;
+        }
+        attempts++;
+    }
+    if (attempts == max_attempts)
+    {
+        Serial.println("NTP to ESP sync timeout!");
+        delay(100);
+        return 0;
+    }
+}
+void setTimezone(String timezone)
+{
+  Serial.printf("  Setting Timezone to %s\n",timezone.c_str());
+  setenv("TZ", timezone.c_str(), 1);  //  Now adjust the TZ.  Clock settings are adjusted to show the new local time
+  tzset();
+}
+unsigned long getESPTime(void)
+{
+  time_t now;
+  struct tm timeinfo;
+
+  if (!getLocalTime(&timeinfo))
+  {
+    Serial.println("Failed to obtain time 1");
+    //delay(100);
+    //SyncTime_DS3231toESP();
+    //ESP.restart();
+    return(0);
+  }
+  time(&now);
+  Serial.println(&timeinfo, "%Y.%m.%d %H:%M:%S");
+
+  return now;
 }
